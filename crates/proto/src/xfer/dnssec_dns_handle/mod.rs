@@ -174,84 +174,89 @@ where
                         .map(Result::<DnsResponse, ProtoError>::Ok)
                 })
                 .and_then(move |verified_message| {
-                    // TODO: I've noticed upstream resolvers don't always return NSEC responses
-                    //   this causes bottom up evaluation to fail
-
-                    // at this point all of the message is verified.
-                    // This is where NSEC and NSEC3 validation occurs
-
-                    if verified_message.answers().is_empty() {
-                        // get SOA name
-                        let soa_name = if let Some(soa_name) = verified_message
-                            .name_servers()
-                            .iter()
-                            // there should only be one
-                            .find(|rr| rr.record_type() == RecordType::SOA)
-                            .map(Record::name)
-                        {
-                            soa_name
-                        } else {
-                            return future::err(ProtoError::from(
-                                "could not validate negative response missing SOA",
-                            ));
-                        };
-
-                        let nsec3s = verified_message
-                            .name_servers()
-                            .iter()
-                            .filter_map(|rr| {
-                                rr.data()
-                                    .as_dnssec()?
-                                    .as_nsec3()
-                                    .map(|data| (rr.name(), data))
-                            })
-                            .collect::<Vec<_>>();
-
-                        let nsecs = verified_message
-                            .name_servers()
-                            .iter()
-                            .filter(|rr| is_dnssec(rr, RecordType::NSEC))
-                            .collect::<Vec<_>>();
-
-                        // Both NSEC and NSEC3 records cannot coexist during
-                        // transition periods, as per RFC 5515 10.4.3 and
-                        // 10.5.2
-                        let nsec_proof = match (nsec3s.is_empty(), nsecs.is_empty()) {
-                            (false, true) => verify_nsec3(
-                                &query,
-                                soa_name,
-                                verified_message.response_code(),
-                                verified_message.answers(),
-                                &nsec3s,
-                            ),
-                            (true, false) => verify_nsec(&query, soa_name, nsecs.as_slice()),
-                            (false, false) => {
-                                warn!(
-                                    "response contains both NSEC and NSEC3 records\nQuery:\n{query:?}\nResponse:\n{verified_message:?}"
-                                );
-                                Proof::Bogus
-                            },
-                            (true, true) => {
-                                warn!(
-                                    "response does not contain NSEC or NSEC3 records. Query: {query:?} response: {verified_message:?}"
-                                );
-                                Proof::Bogus
-                            },
-                        };
-
-                        if !nsec_proof.is_secure() {
-                            // TODO change this to remove the NSECs, like we do for the others?
-                            return future::err(ProtoError::from(ProtoErrorKind::Nsec {
-                                query: query.clone(),
-                                proof: nsec_proof,
-                            }));
-                        }
-                    }
-
-                    future::ok(verified_message)
+                    future::ready(check_nsec(verified_message, &query))
                 }),
         )
     }
+}
+
+/// TODO: I've noticed upstream resolvers don't always return NSEC responses
+///   this causes bottom up evaluation to fail
+///
+/// at this point all of the message is verified.
+/// This is where NSEC and NSEC3 validation occurs
+fn check_nsec(verified_message: DnsResponse, query: &Query) -> Result<DnsResponse, ProtoError> {
+    if !verified_message.answers().is_empty() {
+        return Ok(verified_message);
+    }
+
+    // get SOA name
+    let soa_name = if let Some(soa_name) = verified_message
+        .name_servers()
+        .iter()
+        // there should only be one
+        .find(|rr| rr.record_type() == RecordType::SOA)
+        .map(Record::name)
+    {
+        soa_name
+    } else {
+        return Err(ProtoError::from(
+            "could not validate negative response missing SOA",
+        ));
+    };
+
+    let nsec3s = verified_message
+        .name_servers()
+        .iter()
+        .filter_map(|rr| {
+            rr.data()
+                .as_dnssec()?
+                .as_nsec3()
+                .map(|data| (rr.name(), data))
+        })
+        .collect::<Vec<_>>();
+
+    let nsecs = verified_message
+        .name_servers()
+        .iter()
+        .filter(|rr| is_dnssec(rr, RecordType::NSEC))
+        .collect::<Vec<_>>();
+
+    // Both NSEC and NSEC3 records cannot coexist during
+    // transition periods, as per RFC 5515 10.4.3 and
+    // 10.5.2
+    let nsec_proof = match (nsec3s.is_empty(), nsecs.is_empty()) {
+        (false, true) => verify_nsec3(
+            query,
+            soa_name,
+            verified_message.response_code(),
+            verified_message.answers(),
+            &nsec3s,
+        ),
+        (true, false) => verify_nsec(query, soa_name, nsecs.as_slice()),
+        (false, false) => {
+            warn!(
+            "response contains both NSEC and NSEC3 records\nQuery:\n{query:?}\nResponse:\n{verified_message:?}"
+        );
+            Proof::Bogus
+        }
+        (true, true) => {
+            warn!(
+            "response does not contain NSEC or NSEC3 records. Query: {query:?} response: {verified_message:?}"
+        );
+            Proof::Bogus
+        }
+    };
+
+    if !nsec_proof.is_secure() {
+        // TODO change this to remove the NSECs, like we do for the others?
+        return Err(ProtoError::from(ProtoErrorKind::Nsec {
+            query: query.clone(),
+            proof: nsec_proof,
+        }));
+    }
+
+    Ok(verified_message)
 }
 
 /// Extracts the different sections of a message and verifies the RRSIGs
