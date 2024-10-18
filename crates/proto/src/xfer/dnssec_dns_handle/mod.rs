@@ -17,7 +17,7 @@ use std::{
 
 use async_recursion::async_recursion;
 use futures_util::{
-    future::{self, FutureExt, TryFutureExt},
+    future::{self, TryFutureExt},
     stream::{self, Stream, TryStreamExt},
 };
 use tracing::{debug, trace, warn};
@@ -163,15 +163,7 @@ where
             self.handle
                 .send(request)
                 .and_then(move |message_response| {
-                    // group the record sets by name and type
-                    //  each rrset type needs to validated independently
-                    debug!(
-                        "validating message_response: {}, with {} trust_anchors",
-                        message_response.id(),
-                        handle.trust_anchor.len(),
-                    );
                     verify_response(handle.clone(), message_response, options)
-                        .map(Result::<DnsResponse, ProtoError>::Ok)
                 })
                 .and_then(move |verified_message| {
                     future::ready(check_nsec(verified_message, &query))
@@ -264,10 +256,18 @@ async fn verify_response<H>(
     handle: DnssecDnsHandle<H>,
     mut message: DnsResponse,
     options: DnsRequestOptions,
-) -> DnsResponse
+) -> Result<DnsResponse, ProtoError>
 where
     H: DnsHandle + Sync + Unpin,
 {
+    debug!(
+        "validating message_response: {}, with {} trust_anchors",
+        message.id(),
+        handle.trust_anchor.len(),
+    );
+
+    // group the record sets by name and type
+    //  each rrset type needs to validated independently
     let answers = message.take_answers();
     let nameservers = message.take_name_servers();
     let additionals = message.take_additionals();
@@ -280,7 +280,7 @@ where
     message.insert_name_servers(nameservers);
     message.insert_additionals(additionals);
 
-    message
+    Ok(message)
 }
 
 /// This pulls all answers returned in a Message response and returns a future which will
