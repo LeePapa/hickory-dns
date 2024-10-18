@@ -9,6 +9,8 @@
 
 use std::fmt;
 
+#[cfg(feature = "dnssec")]
+use crate::rr::dnssec::{Algorithm, SupportedAlgorithms};
 use crate::{
     error::*,
     rr::{
@@ -54,6 +56,30 @@ impl Edns {
     /// Creates a new extended DNS object.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a new extended DNS object prepared for DNSSEC messages.
+    #[cfg(feature = "dnssec")]
+    pub fn for_dnssec() -> Self {
+        let mut new = Self::default();
+        new.set_dnssec_ok(true);
+
+        // send along the algorithms which are supported by this handle
+        let mut algorithms = SupportedAlgorithms::new();
+        #[cfg(feature = "dnssec-ring")]
+        {
+            algorithms.set(Algorithm::ED25519);
+        }
+        algorithms.set(Algorithm::ECDSAP256SHA256);
+        algorithms.set(Algorithm::ECDSAP384SHA384);
+        algorithms.set(Algorithm::RSASHA256);
+
+        let dau = EdnsOption::DAU(algorithms);
+        let dhu = EdnsOption::DHU(algorithms);
+
+        new.options_mut().insert(dau);
+        new.options_mut().insert(dhu);
+        new
     }
 
     /// The high order bytes for the response code in the DNS Message
